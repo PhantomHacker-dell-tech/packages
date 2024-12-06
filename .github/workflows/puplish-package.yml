@@ -29,8 +29,11 @@ jobs:
       - name: Build And Publish Application Packages
         # Create the dos-games package with the cosign signature, publish to ghcr and copy the tags to allow 'uname -m' to work
         run: |
-          zarf package create -o build -a amd64 examples/dos-games --signing-key=awskms://${{ secrets.COSIGN_AWS_KMS_KEY }} --confirm
-          zarf package create -o build -a arm64 examples/dos-games --signing-key=awskms://${{ secrets.COSIGN_AWS_KMS_KEY }} --confirm
+          run: |
+          zarf package create -o build -a amd64 examples/dos-games --signing-key=awskms://us-west-2/abcd1234-56ef-78gh-90ij-klmnopqrst --confirm
+          zarf package create -o build -a arm64 examples/dos-games --signing-key=awskms://us-west-2/abcd1234-56ef-78gh-90ij-klmnopqrst --confirm
+          # zarf package create -o build -a amd64 examples/dos-games --signing-key=awskms://${{ secrets.COSIGN_AWS_KMS_KEY }} --confirm
+          # zarf package create -o build -a arm64 examples/dos-games --signing-key=awskms://${{ secrets.COSIGN_AWS_KMS_KEY }} --confirm
           # Publish a the signed dos-games package
           # Publish a skeleton of the dos-games package
           zarf package publish examples/dos-games oci://ghcr.io/zarf-dev/packages
