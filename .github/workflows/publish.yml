@@ -1,32 +1,45 @@
-name: Publish to Docker
+# Copyright 2024 Defense Unicorns
+# SPDX-License-Identifier: AGPL-3.0-or-later OR LicenseRef-Defense-Unicorns-Commercial
+
+name: Release
+
 on:
   push:
     branches:
       - main
+
+# Permissions for the GITHUB_TOKEN used by the workflow.
 permissions:
-  packages: write
+  contents: read # Allows reading the content of the repository.
+  packages: read # Allows reading the content of the repository's packages.
+  id-token: write
+
 jobs:
-  publish:
+  tag-new-version:
+    permissions: write-all
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release-flag.outputs.release_created }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      # Add your test steps here if needed...
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v4
-        with:
-          images: ghcr.io/emreari/publish-packages/game
-          tags: type=sha
-      - name: Login to GHCR
-        uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build container
-        uses: docker/build-push-action@v4
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+      - name: Create Release Tag
+        id: tag
+        uses: googleapis/release-please-action@7987652d64b4581673a76e33ad5e98e3dd56832f # v4.1.3
+      - id: release-flag
+        run: echo "release_created=${{ steps.tag.outputs.release_created || false }}" >> "$GITHUB_OUTPUT"
+
+  publish:
+    permissions:
+      contents: read # Allows reading the content of the repository.
+      packages: write # Allows reading the content of the repository's packages.
+      id-token: write
+    needs: tag-new-version
+    if: ${{ needs.tag-new-version.outputs.release_created == 'true' }}
+    strategy:
+      matrix:
+        flavor: [upstream, registry1, unicorn]
+        architecture: [amd64]
+    uses: defenseunicorns/uds-common/.github/workflows/callable-publish.yaml@5b91b1e0809cc34b397cf3914cda81e32ccb85b2 # v1.4.0
+    with:
+      flavor: ${{ matrix.flavor }}
+      runsOn: uds-marketplace-ubuntu-big-boy-8-core
+    secrets: inherit # Inherits all secrets from the parent workflow.
