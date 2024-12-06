@@ -1,39 +1,143 @@
-name: Zarf Application Package Publishing
+name: Packages
+
+on:
+  push:
+  pull_request:
+  repository_dispatch:
+    types: [run_build]
 
 permissions:
   contents: read
-
-on:
-  workflow_dispatch:
+  pages: write
+  id-token: write
+  packages: write
 
 jobs:
-  publish-packages:
+  prepare_jobs:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      packages: write
+    container: python:3-alpine
     steps:
-      - name: "Checkout Repo"
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
-
-      - name: Install The Latest Release Version of Zarf
-        uses: defenseunicorns/setup-zarf@10e539efed02f75ec39eb8823e22a5c795f492ae #v1.0.1
-
-      - name: "Login to GHCR"
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
-        with:
-          registry: ghcr.io
-          username: dummy
-          password: ${{ github.token }}
-
-      - name: Build And Publish Application Packages
-        # Create the dos-games package with the cosign signature, publish to ghcr and copy the tags to allow 'uname -m' to work
+      - uses: actions/checkout@v4
+      - name: Generate build list
+        id: set-matrix
         run: |
-          run: |
-          zarf package create -o build -a amd64 examples/dos-games --signing-key=awskms://us-west-2/abcd1234-56ef-78gh-90ij-klmnopqrst --confirm
-          zarf package create -o build -a arm64 examples/dos-games --signing-key=awskms://us-west-2/abcd1234-56ef-78gh-90ij-klmnopqrst --confirm
-          # zarf package create -o build -a amd64 examples/dos-games --signing-key=awskms://${{ secrets.COSIGN_AWS_KMS_KEY }} --confirm
-          # zarf package create -o build -a arm64 examples/dos-games --signing-key=awskms://${{ secrets.COSIGN_AWS_KMS_KEY }} --confirm
-          # Publish a the signed dos-games package
-          # Publish a skeleton of the dos-games package
-          zarf package publish examples/dos-games oci://ghcr.io/zarf-dev/packages
+          echo "build_list=$(./get_depends.py)" >> $GITHUB_OUTPUT
+          cat $GITHUB_OUTPUT
+    outputs:
+      build_list: ${{ steps.set-matrix.outputs.build_list }}
+
+  build:
+    needs: [prepare_jobs]
+    runs-on: ubuntu-latest
+    container: ghcr.io/pspdev/pspsdk:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        packages: ${{ fromJson(needs.prepare_jobs.outputs.build_list) }}
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build packages
+      run: |
+        adduser -D -h /build -s /bin/bash build
+        chown -R build:build /build ${PSPDEV}
+        for f in ${{ matrix.packages }}; do
+        chown -R build:build $f
+        cd $f
+        sudo -u build PATH=${PATH} PSPDEV=${PSPDEV} LIBMAKEPKG_LINT_PACKAGE_DOTFILES_SH=0 ${PSPDEV}/bin/psp-makepkg --noconfirm
+        sudo -u build PATH=${PATH} PSPDEV=${PSPDEV} ${PSPDEV}/bin/psp-pacman -U --noconfirm *.pkg.tar.gz --overwrite '*'
+        cd ..
+        done
+    - name: Store package
+      run: |
+        export PACKAGE=`echo ${{ matrix.packages }} | awk '{print $NF}'`
+        echo "PACKAGE=$PACKAGE" >> $GITHUB_ENV
+    - uses: actions/upload-artifact@v4
+      with:
+        name: artifact-${{ env.PACKAGE }}
+        path: ${{ env.PACKAGE }}/*.pkg.tar.gz
+
+  package_repo:
+    if: contains(github.ref,'refs/heads/master')
+    needs: [prepare_jobs, build]
+    runs-on: ubuntu-latest
+    container: ghcr.io/pspdev/pspsdk:latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+    - name: Create repo files
+      run: |
+        chown -R $(id -nu):$(id -ng) .
+        apk add --no-cache bash coreutils
+        mkdir repo
+        cp artifact-*/*.pkg.tar.gz repo/
+        ./make-repo-html.sh
+        cd repo
+        ${PSPDEV}/share/pacman/bin/repo-add pspdev.db.tar.gz *.pkg.tar.gz
+        mv pspdev.db.tar.gz pspdev.db
+        mv pspdev.files.tar.gz pspdev.files
+        tar -cvf ../repo.tar ./*
+    - name: Upload repo artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: github-pages
+        path: repo.tar
+
+  publish_repo:
+    if: contains(github.ref,'refs/heads/master')
+    needs: [package_repo]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  docker-layer:
+    if: contains(github.ref,'refs/heads/master')
+    needs: [publish_repo]
+    runs-on: ubuntu-latest
+  
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Login to Github registry
+      uses: docker/login-action@v3
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+        registry: ghcr.io
+    
+    - uses: docker/build-push-action@v5
+      with:
+        push: true
+        tags: ghcr.io/${{ github.repository }}:latest
+        build-args: |
+          BASE_DOCKER_IMAGE=ghcr.io/${{ github.repository_owner }}/pspsdk:latest
+    
+    - name: Send Compile action
+      run: |
+        export DISPATCH_ACTION="$(echo run_build)"
+        echo "NEW_DISPATCH_ACTION=$DISPATCH_ACTION" >> $GITHUB_ENV
+    - name: Repository Dispatch to pspdev
+      uses: peter-evans/repository-dispatch@v3
+      with:
+        repository: ${{ github.repository_owner }}/pspdev
+        token: ${{ secrets.DISPATCH_TOKEN }}
+        event-type: ${{ env.NEW_DISPATCH_ACTION }}
+        client-payload: '{"ref": "refs/heads/master"}'
